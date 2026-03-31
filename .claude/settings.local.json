@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /Users/wangmeng/.openclaw/workspace/skills/quicker-connector -name \"*.md\" -exec wc -l {} +)",
+      "Bash(find /Users/wangmeng/.openclaw/workspace/skills/quicker-connector -type f -not -path */.* -not -path */__pycache__/*)",
+      "Bash(gh release:*)",
+      "Bash(git rm:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:getquicker.net)",
+      "WebFetch(domain:tools.getquicker.cn)",
+      "Bash(python3 -m py_compile scripts/quicker_connector.py)",
+      "Bash(python3 -m py_compile scripts/init_quicker.py)"
+    ]
+  }
+}
