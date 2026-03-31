@@ -10,6 +10,9 @@ import json
 import sqlite3
 import subprocess
 import os
+import urllib.request
+import urllib.parse
+import urllib.error
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass, asdict
@@ -649,6 +652,116 @@ class QuickerActionRunner:
         return self.run_action(action_name, parameters, wait_for_result, timeout)
 
 
+PUSH_API_URL = "https://push.getquicker.cn/to/quicker"
+PUSH_MAX_TIMEOUT = 30  # 推送服务最长等待 30 秒
+
+
+class QuickerPushRunner:
+    """
+    Quicker 远程推送执行器
+    通过 Quicker 云推送服务远程触发动作，支持传参和同步等待结果。
+    需要在 Quicker 会员中心获取验证码：https://getquicker.net/user/connection
+    """
+
+    def __init__(self, user: str, code: str):
+        """
+        Args:
+            user: Quicker 账号邮箱
+            code: 会员中心的推送验证码
+        """
+        if not user or not code:
+            raise ValueError("push_user 和 push_code 不能为空，请先在 config.json 中配置")
+        self.user = user
+        self.code = code
+
+    def push_action(
+        self,
+        action: str,
+        data: Optional[str] = None,
+        wait: bool = True,
+        timeout: int = 20
+    ) -> QuickerActionResult:
+        """
+        通过推送服务远程执行动作。
+
+        Args:
+            action: 动作名称或 ID
+            data:   传递给动作的参数字符串
+            wait:   是否等待动作执行完成并返回结果
+            timeout: 等待超时秒数（最大 30）
+
+        Returns:
+            QuickerActionResult
+        """
+        timeout = min(timeout, PUSH_MAX_TIMEOUT)
+
+        payload = {
+            "toUser": self.user,
+            "code": self.code,
+            "operation": "action",
+            "action": action,
+            "wait": wait,
+        }
+        if data:
+            payload["data"] = data
+
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        if len(body) > 30 * 1024:
+            return QuickerActionResult(
+                success=False,
+                output="",
+                error="请求体超过 30KB 限制，请减少 data 参数大小"
+            )
+
+        req = urllib.request.Request(
+            PUSH_API_URL,
+            data=body,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST"
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8")
+
+            try:
+                result_data = json.loads(raw)
+            except json.JSONDecodeError:
+                return QuickerActionResult(success=True, output=raw)
+
+            # Quicker 推送服务返回格式：{"success": bool, "message": "...", "data": ...}
+            ok = result_data.get("success", True)
+            message = result_data.get("message", "")
+            ret_data = result_data.get("data", "")
+            output = str(ret_data) if ret_data else message
+
+            return QuickerActionResult(
+                success=ok,
+                output=output,
+                error=message if not ok else None
+            )
+
+        except urllib.error.HTTPError as e:
+            body_text = e.read().decode("utf-8", errors="replace")
+            return QuickerActionResult(
+                success=False,
+                output="",
+                error=f"HTTP {e.code}: {body_text}"
+            )
+        except urllib.error.URLError as e:
+            return QuickerActionResult(
+                success=False,
+                output="",
+                error=f"网络错误: {e.reason}"
+            )
+        except TimeoutError:
+            return QuickerActionResult(
+                success=False,
+                output="",
+                error=f"推送请求超时（{timeout}秒）"
+            )
+
+
 class QuickerConnector:
     """
     Quicker 连接器 - 整合动作读取、搜索和调用功能
@@ -683,7 +796,8 @@ class QuickerConnector:
             raise ValueError(f"不支持的数据源类型: {source}")
 
         self.matcher = ActionMatcher(self.reader)
-        self.runner = None  # 延迟初始化
+        self.runner = None        # 延迟初始化（本地执行器）
+        self.push_runner = None   # 延迟初始化（推送执行器）
 
     def _load_csv_path_from_config(self) -> Optional[str]:
         """从配置文件读取 CSV 路径"""
@@ -714,10 +828,19 @@ class QuickerConnector:
         return None
 
     def _get_runner(self) -> QuickerActionRunner:
-        """获取动作执行器（延迟初始化）"""
+        """获取本地动作执行器（延迟初始化）"""
         if self.runner is None:
             self.runner = QuickerActionRunner()
         return self.runner
+
+    def _get_push_runner(self) -> QuickerPushRunner:
+        """获取推送执行器（延迟初始化），从 config.json 读取凭证"""
+        if self.push_runner is None:
+            config = get_config()
+            user = config.get("push_user", "")
+            code = config.get("push_code", "")
+            self.push_runner = QuickerPushRunner(user=user, code=code)
+        return self.push_runner
 
     def read_actions(self) -> List[QuickerAction]:
         """读取所有动作"""
@@ -832,6 +955,30 @@ class QuickerConnector:
             "by_type": type_count,
             "by_panel": panel_count
         }
+
+    def push_action(
+        self,
+        action: str,
+        data: Optional[str] = None,
+        wait: bool = True,
+        timeout: int = 20
+    ) -> QuickerActionResult:
+        """
+        通过 Quicker 云推送服务远程触发动作。
+
+        前提：在 config.json 中配置 push_user（账号邮箱）和 push_code（验证码）。
+        验证码获取地址：https://getquicker.net/user/connection
+
+        Args:
+            action:  动作名称或 ID
+            data:    传递给动作的参数字符串
+            wait:    是否同步等待结果（最长 30 秒）
+            timeout: 超时秒数
+
+        Returns:
+            QuickerActionResult
+        """
+        return self._get_push_runner().push_action(action, data, wait, timeout)
 
     def export_to_json(self, output_path: str) -> None:
         """

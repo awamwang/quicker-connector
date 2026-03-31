@@ -10,7 +10,7 @@ Quicker Connector 初始化引导脚本
 import json
 import os
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 
 def check_config(config_file: str = None) -> bool:
@@ -118,25 +118,70 @@ def prompt_csv_path() -> Optional[str]:
         return csv_path
 
 
-def save_config(config_file: str, csv_path: str) -> bool:
+def prompt_push_config() -> Dict[str, str]:
+    """
+    可选：引导用户配置 Quicker 推送服务凭证。
+
+    Returns:
+        包含 push_user / push_code 的字典（可能为空值）
+    """
+    print()
+    print("-" * 70)
+    print("可选：配置远程推送执行（方案 C）")
+    print("-" * 70)
+    print()
+    print("推送服务允许通过 Quicker 云端远程触发动作，并获取执行结果。")
+    print("需要在 Quicker 会员中心获取验证码：")
+    print("  https://getquicker.net/user/connection")
+    print()
+
+    setup = input("是否现在配置推送凭证？(y/n，直接回车跳过): ").strip().lower()
+    if setup != 'y':
+        print("已跳过推送配置，可稍后手动在 config.json 中添加 push_user / push_code。")
+        return {}
+
+    push_user = input("Quicker 账号邮箱: ").strip()
+    push_code = input("推送验证码: ").strip()
+
+    if not push_user or not push_code:
+        print("输入为空，跳过推送配置。")
+        return {}
+
+    return {"push_user": push_user, "push_code": push_code}
+
+
+def save_config(config_file: str, csv_path: str, extra: Optional[Dict[str, Any]] = None) -> bool:
     """
     保存配置到文件
 
     Args:
         config_file: 配置文件路径
-        csv_path: CSV 文件路径
+        csv_path:    CSV 文件路径
+        extra:       额外配置项（如 push_user / push_code）
 
     Returns:
         保存成功返回 True，否则返回 False
     """
     try:
-        config = {
-            "csv_path": csv_path,
-            "initialized": True
-        }
+        # 如果配置文件已存在，先读取保留其他字段
+        config: Dict[str, Any] = {}
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+            except Exception:
+                pass
+
+        config["csv_path"] = csv_path
+        config["initialized"] = True
+
+        if extra:
+            config.update(extra)
 
         # 确保目录存在
-        os.makedirs(os.path.dirname(config_file), exist_ok=True)
+        parent = os.path.dirname(config_file)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
 
         # 写入配置文件
         with open(config_file, 'w', encoding='utf-8') as f:
@@ -184,12 +229,18 @@ def initialize() -> bool:
     if csv_path is None:
         return False
 
+    # 可选：推送服务配置
+    push_config = prompt_push_config()
+
     # 保存配置
     print("\n正在保存配置...")
-    if save_config(config_file, csv_path):
+    if save_config(config_file, csv_path, extra=push_config if push_config else None):
         print("\n✓ 配置已成功保存")
         print(f"  配置文件: {config_file}")
         print(f"  CSV 路径: {csv_path}")
+        if push_config:
+            print(f"  推送账号: {push_config.get('push_user', '')}")
+            print("  推送验证码: ******")
         print("\n现在可以使用 Quicker Connector 技能了！")
         return True
     else:
